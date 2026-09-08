@@ -19,6 +19,9 @@ at all:
 | Allegro | the buyer order endpoint the website calls (`api.allegro.pl/myorder-api/myorders`) | works from a browser session cookie, which expires within days |
 | Action | not published anywhere | endpoint must be supplied as configuration; until then, e-mail only |
 
+Where each auth flow and receipt endpoint comes from — and how to capture
+Action's yourself — is written up in [docs/reverse-engineering.md](docs/reverse-engineering.md).
+
 Allegro's *public* REST API (`developer.allegro.pl`, OAuth) is a seller API:
 `GET /order/checkout-forms` returns the orders placed **with** you, not the ones
 you placed. The buyer's "Moje zakupy" list has no OAuth equivalent — see

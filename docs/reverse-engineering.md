@@ -1,0 +1,129 @@
+# Where the auth and receipt mechanisms come from
+
+None of these three apps has a documented public API for reading your own
+receipts. Everything below is reverse-engineered — from the apps' own network
+traffic, published by the community. This file records what each mechanism is,
+where it was verified, and how the code here maps onto it, so the next person
+(or the next model) does not have to rediscover it.
+
+A note on how it was gathered in this repo's environment: the sandbox that built
+this server has an allow-listed egress (GitHub and the language package
+registries only), so APK mirrors, Google Play and the stores' own domains are
+all blocked there. The APKs could not be pulled and decompiled in place. That is
+not a real limitation for the result, because the decompilation has already been
+done and published for the two apps where it exists (Lidl, Allegro); those
+findings are cited below. To redo the capture yourself from a real device, the
+method is the standard one: a proxy (mitmproxy / Charles / Proxyman) with its CA
+trusted on the device, plus, for apps that pin certificates, Frida with a
+pinning-bypass script; then read the app's own requests. `jadx` on the APK gives
+the static side (endpoints, client ids, header names) when traffic alone is not
+enough.
+
+---
+
+## Lidl Plus — works fully
+
+Source of truth: the community project **[Andre0512/lidl-plus]** (Python),
+reverse-engineered from the app. The Go provider (`internal/provider/lidl`)
+implements the same flow.
+
+**Auth — OAuth 2.0 Authorization Code + PKCE, against Lidl's IdentityServer.**
+
+- Authorization/OIDC issuer: `https://accounts.lidl.com`
+- Token endpoint: `POST https://accounts.lidl.com/connect/token`
+- Native client id: `LidlPlusNativeClient`, client secret `secret`
+  (a public/native client; the secret is not really secret)
+- Client authentication on the token endpoint: HTTP Basic
+  `base64("LidlPlusNativeClient:secret")`
+- Scopes: `openid profile offline_access lpprofile lpapis`
+- Redirect URI: `com.lidlplus.app://callback`
+- The interactive login (username + password + SMS 2FA) happens in a browser
+  and yields a **refresh token**. After that the app — and this server — only
+  ever call the token endpoint with `grant_type=refresh_token`. The refresh
+  token **rotates on every renewal**, so the new one has to be persisted or the
+  next start has to go through the browser again.
+
+**Receipts ("tickets").**
+
+- List: `GET https://tickets.lidlplus.com/api/v2/{country}/tickets?pageNumber={n}&onlyFavorite=false`
+- One receipt with lines: `GET https://tickets.lidlplus.com/api/v2/{country}/tickets/{id}`
+- Required headers on every call:
+  `Authorization: Bearer <access token>`, `App-Version: 999.99.9`,
+  `Operating-System: iOs`, `App: com.lidl.eci.lidl.plus`,
+  `Accept-Language: <language>`
+- `{country}` is the uppercase two-letter account country (PL, DE, …);
+  the language sets the item-name language.
+
+This is why Lidl needs only a refresh token from the user: the hard,
+interactive part is done once, off to the side, exactly as the app does it.
+
+[Andre0512/lidl-plus]: https://github.com/Andre0512/lidl-plus
+
+---
+
+## Allegro — works from a session cookie
+
+The **public** Allegro REST API (`api.allegro.pl`, OAuth) is a *seller* API:
+`GET /order/checkout-forms` returns orders placed *with* you. There is no OAuth
+equivalent for the buyer's own "Moje zakupy" list — Allegro's own answer in
+[allegro-api discussion #5394] is that the buyer methods were never carried over
+to the REST API.
+
+The buyer list is served by an **internal** endpoint that the web app and the
+mobile app call, authenticated by the **logged-in session cookie**, not by an
+OAuth bearer token. Verified against two independent community clients that do
+exactly this:
+
+- **[Przemko92/home-assistant-allegro]** — a Home Assistant integration
+- **[wini83/ff-iii-toolkit-api]** — a Firefly III toolkit
+
+Both agree on the mechanism, and it is what `internal/provider/allegro`
+implements:
+
+- Endpoint: `GET https://api.allegro.pl/myorder-api/myorders?limit={n}&offset={m}`
+- Auth: the browser session cookie. The one that matters is **`QXLSESSID`**;
+  copying the whole `Cookie` header of a logged-in request is the robust way to
+  supply it.
+- Required headers (this is the refinement those clients contributed):
+  - `Accept: application/vnd.allegro.public.v3+json` — the **versioned vendor
+    media type**. With a plain `application/json` the endpoint can answer with a
+    redirect to login instead of the order JSON.
+  - `Referer: https://allegro.pl/`
+- The cookie expires within days; when it does the endpoint stops returning
+  JSON, the provider reports `ErrCredentialsRejected`, and the mailbox fallback
+  takes over.
+
+There is no per-order buyer endpoint, so `Get` looks the order up in the recent
+pages.
+
+[allegro-api discussion #5394]: https://github.com/allegro/allegro-api/discussions/5394
+[Przemko92/home-assistant-allegro]: https://github.com/Przemko92/home-assistant-allegro
+[wini83/ff-iii-toolkit-api]: https://github.com/wini83/ff-iii-toolkit-api
+
+---
+
+## Action — no published endpoint
+
+Action's digital receipts ("digitale kassabonnen") live in the Action app and in
+the Mijn Action account. Action publishes no API for them, and — unlike Lidl and
+Allegro — **no community project has captured and published the app's endpoint**
+(searched GitHub code and the web; nothing exists as of 2026-09).
+
+So there is nothing verified to hard-code. `internal/provider/action` therefore
+treats the endpoint as **configuration**: give it `api_base` (plus, if needed,
+`login_path` / `receipts_path`) captured from your own Mijn Action session, and
+it maps the response onto the normalized model — the mapping probes field names
+rather than assuming a documented shape. Authentication accepts a captured
+bearer `token`, a session `cookie`, or `email`+`password` exchanged at
+`login_path`.
+
+Until that endpoint is supplied, Action receipts come from the e-mail fallback
+(order/receipt confirmation mails parsed over IMAP), which gives the total and
+the shop but usually not the item lines.
+
+**To capture it yourself:** log in to Mijn Action in a browser (or proxy the
+app), open the network panel, and find the request the "Mijn digitale
+kassabonnen" page makes — its URL becomes `api_base` + `receipts_path`, and its
+`Authorization` / `Cookie` header is what you store. If you send me that request
+(headers + a sample JSON response, secrets redacted), the field mapping can be
+pinned to Action's real shape instead of probed.

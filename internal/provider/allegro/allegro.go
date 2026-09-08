@@ -38,6 +38,10 @@ const defaultEndpoint = "https://api.allegro.pl/myorder-api/myorders"
 // purchasesURL is where a human can look the order up.
 const purchasesURL = "https://allegro.pl/moje-allegro/zakupy/kupione"
 
+// acceptHeader is the versioned vendor media type myorder-api expects; a plain
+// application/json is answered with a login redirect instead.
+const acceptHeader = "application/vnd.allegro.public.v3+json"
+
 // pageSize is how many orders one request asks for.
 const pageSize = 50
 
@@ -67,7 +71,7 @@ func (p *Provider) Status(ctx context.Context) provider.Status {
 		StoredFields: p.store.FieldNames(ID),
 		Sources:      []string{"api"},
 		RequiredFields: []provider.Field{
-			{Name: "cookie", Description: "Cookie header copied from a logged-in allegro.pl browser session (see README)", Required: true, Secret: true},
+			{Name: "cookie", Description: "Cookie header from a logged-in allegro.pl session (the QXLSESSID session cookie is the one that matters; see README)", Required: true, Secret: true},
 			{Name: "endpoint", Description: "override for the buyer order endpoint; defaults to " + defaultEndpoint, Required: false},
 		},
 		Notes: []string{
@@ -190,7 +194,13 @@ func (p *Provider) fetch(ctx context.Context, page int) ([]jsonx.Object, error) 
 		return nil, err
 	}
 	req.Header.Set("Cookie", cookie)
-	req.Header.Set("Accept", "application/json")
+	// myorder-api answers with the buyer order shape only for the versioned
+	// vendor Accept header the site itself sends; a plain application/json can
+	// get a redirect to login instead. The Referer is part of that same
+	// same-origin expectation. (Confirmed against the community Allegro
+	// clients Przemko92/home-assistant-allegro and wini83/ff-iii-toolkit-api.)
+	req.Header.Set("Accept", acceptHeader)
+	req.Header.Set("Referer", "https://allegro.pl/")
 	req.Header.Set("Accept-Language", "pl-PL,pl;q=0.9")
 
 	data, resp, err := p.client.Do(ctx, req)
