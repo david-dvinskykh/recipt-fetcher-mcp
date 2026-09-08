@@ -1,0 +1,6 @@
+bin/
+*.exe
+
+# Local state: encrypted credentials and the key that opens them.
+credentials.enc
+secret.key
