@@ -127,3 +127,36 @@ kassabonnen" page makes — its URL becomes `api_base` + `receipts_path`, and it
 `Authorization` / `Cookie` header is what you store. If you send me that request
 (headers + a sample JSON response, secrets redacted), the field mapping can be
 pinned to Action's real shape instead of probed.
+
+---
+
+## Getting the APKs and decompiling them yourself
+
+The APKs themselves were retrieved for this analysis (via a server-side file
+relay, since the build sandbox has no direct route to APK mirrors) and are on
+the owner's Google Drive:
+
+- Action `com.action.consumerapp` — XAPK, 32.86 MB,
+  sha256 `163f7f9efe1e490a4c4a977b506322993b0ee558a4afae02542e69c7bb494895`
+- Allegro `pl.allegro` — APK, 91.19 MB,
+  sha256 `dda942edc65ce5cccbd2cbc5d37ef15a2a61f27280b25ee571d7e54ac7d95b9c`
+- Lidl Plus `com.lidl.eci.lidlplus` — XAPK bundle, ~100.9 MB (its auth and
+  receipt flow is already fully known, see above)
+
+Decompiling one, once you have the file:
+
+```bash
+# jadx (Java 11+). An XAPK is a zip of split APKs; unzip it first and point
+# jadx at the base module (the one without a config.* suffix).
+unzip -o Action_com.action.consumerapp.xapk -d action_xapk
+jadx -d action_src action_xapk/com.action.consumerapp.apk       # a plain .apk: jadx -d out app.apk
+
+# Then look for the receipt endpoint and how it is authenticated:
+grep -rEi 'https?://[^"]*(receipt|kassabon|ticket|transacti|loyalty|api)' action_src/ | sort -u
+grep -rEi 'authorization|bearer|oauth|/token|client_id|x-api-key' action_src/ | sort -u
+```
+
+For traffic instead of static code (often faster to find the live endpoint):
+run the app on a device with mitmproxy/Charles as the system proxy and its CA
+trusted; if the app pins certificates, start it under Frida with a standard
+pinning-bypass script and read the requests to the receipts screen.
