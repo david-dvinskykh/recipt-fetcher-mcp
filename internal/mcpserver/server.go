@@ -213,6 +213,34 @@ func (s *Server) StatusReport(ctx context.Context) (any, error) {
 	return out, err
 }
 
+// WebLogin performs a login exactly as the receipts_login tool does, so the
+// HTTP auth web app (button-auth) can reuse the same validation and storage.
+func (s *Server) WebLogin(ctx context.Context, providerID string, fields map[string]string) (provider.LoginResult, error) {
+	id := strings.ToLower(strings.TrimSpace(providerID))
+	if id == "" {
+		return provider.LoginResult{}, errors.New("provider is required")
+	}
+	if len(fields) == 0 {
+		return provider.LoginResult{}, errors.New("no credentials provided")
+	}
+	if id == mailbox.SecretID {
+		if err := s.mail.Login(ctx, fields); err != nil {
+			return provider.LoginResult{}, err
+		}
+		return provider.LoginResult{
+			Provider: mailbox.SecretID,
+			OK:       true,
+			Message:  "mailbox credentials verified",
+			Stored:   s.mail.Fields(),
+		}, nil
+	}
+	p, err := s.registry.Get(id)
+	if err != nil {
+		return provider.LoginResult{}, err
+	}
+	return p.Login(ctx, fields)
+}
+
 // --- receipts_login ---
 
 type loginInput struct {
