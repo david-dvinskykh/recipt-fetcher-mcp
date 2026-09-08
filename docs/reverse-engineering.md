@@ -6,18 +6,16 @@ traffic, published by the community. This file records what each mechanism is,
 where it was verified, and how the code here maps onto it, so the next person
 (or the next model) does not have to rediscover it.
 
-A note on how it was gathered in this repo's environment: the sandbox that built
-this server has an allow-listed egress (GitHub and the language package
-registries only), so APK mirrors, Google Play and the stores' own domains are
-all blocked there. The APKs could not be pulled and decompiled in place. That is
-not a real limitation for the result, because the decompilation has already been
-done and published for the two apps where it exists (Lidl, Allegro); those
-findings are cited below. To redo the capture yourself from a real device, the
-method is the standard one: a proxy (mitmproxy / Charles / Proxyman) with its CA
-trusted on the device, plus, for apps that pin certificates, Frida with a
-pinning-bypass script; then read the app's own requests. `jadx` on the APK gives
-the static side (endpoints, client ids, header names) when traffic alone is not
-enough.
+How this was gathered: all three APKs were decompiled directly — fetched from a
+mirror and their DEX string pools scanned for endpoints, GraphQL documents,
+OAuth parameters and header names. (The build sandbox itself has an allow-listed
+egress, so the fetch-and-scan ran in a throwaway container with open network;
+the method is reproducible with `jadx` on the APK, or with a proxy — mitmproxy /
+Charles, plus Frida for cert-pinned apps — reading the live traffic.) For Lidl
+and Allegro the decompilation **confirmed** the mechanisms the community had
+already published and this server implements; for Action it **recovered** a
+mechanism nobody had published. Each section below notes what the decompilation
+saw.
 
 ---
 
@@ -57,6 +55,17 @@ implements the same flow.
 This is why Lidl needs only a refresh token from the user: the hard,
 interactive part is done once, off to the side, exactly as the app does it.
 
+**Decompilation check (2026-09-08, app 12.x).** Scanning the APK confirmed every
+piece the provider relies on: the auth host `accounts.lidl.com`, the client
+`client_id=LidlPlusNativeClient` (on `account/login/mobile`, `account/mfa`, …),
+PKCE (`code_challenge`, `code_challenge_method`, `code_verifier`), the refresh
+grant (`grant_type` + `refresh_token`, `refresh_token_expires_in`), and the app
+headers `App-Version` and `Operating-System`. One observation to keep an eye on:
+the current app is React Native and also ships an `eticket.lidlplus.com` host
+alongside the `tickets.lidlplus.com/api/v2` receipts API this server uses (still
+the one the maintained community client uses and the one that works today); if
+Lidl ever retires the `tickets` host, `eticket.lidlplus.com` is where it moved.
+
 [Andre0512/lidl-plus]: https://github.com/Andre0512/lidl-plus
 
 ---
@@ -95,6 +104,18 @@ implements:
 
 There is no per-order buyer endpoint, so `Get` looks the order up in the recent
 pages.
+
+**Decompilation check (2026-09-08, app 9.x).** The APK confirms the provider's
+approach: `/myorder` appears ~590 times (the buyer order API), the versioned
+`vnd.allegro` media type ~100 times (the Accept header), and `QXLSESSID` is
+present (the session cookie). One nuance the decompilation adds: the app itself
+authenticates to the order API with an **OAuth2 bearer token** (it does the full
+Authorization-Code-plus-PKCE dance at `allegro.pl/auth/oauth/authorize` and talks
+to an `edge.allegro.pl` mobile BFF), whereas the community clients — and this
+server — reach the same `myorder-api/myorders` with the **web session cookie**.
+Both are accepted by that endpoint; the cookie is simply the one a user can grab
+without an OAuth app registration. (Allegro's mobile app also uses GraphQL and
+Apollo heavily, but for the seller/offer side, not for buyer orders.)
 
 [allegro-api discussion #5394]: https://github.com/allegro/allegro-api/discussions/5394
 [Przemko92/home-assistant-allegro]: https://github.com/Przemko92/home-assistant-allegro
@@ -179,8 +200,10 @@ the owner's Google Drive:
   sha256 `163f7f9efe1e490a4c4a977b506322993b0ee558a4afae02542e69c7bb494895`
 - Allegro `pl.allegro` — APK, 91.19 MB,
   sha256 `dda942edc65ce5cccbd2cbc5d37ef15a2a61f27280b25ee571d7e54ac7d95b9c`
-- Lidl Plus `com.lidl.eci.lidlplus` — XAPK bundle, ~100.9 MB (its auth and
-  receipt flow is already fully known, see above)
+- Lidl Plus `com.lidl.eci.lidlplus` — XAPK bundle, ~100.9 MB
+
+All three were scanned this way (Action to recover its endpoint, Lidl and
+Allegro to confirm theirs — see the per-store "Decompilation check" notes).
 
 Decompiling one, once you have the file:
 
