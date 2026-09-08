@@ -28,6 +28,11 @@ import (
 // Version is reported to MCP clients.
 const Version = "1.0.0"
 
+// connectMetaKey is the MetaMCP Connect Protocol (MCP-Connect v1) namespace.
+// MetaMCP reads it from a tool's _meta to render a generic "Connect" button and
+// form for this server; see docs/button-auth.md and metamcp docs/connect-protocol.md.
+const connectMetaKey = "ai.metamcp.connect/v1"
+
 // inlineExportLimit caps how much export data is returned in a tool result.
 // Larger exports have to be written to a file.
 const inlineExportLimit = 256 * 1024
@@ -113,11 +118,42 @@ func (s *Server) MCPServer() *mcp.Server {
 		Description: "Store credentials for one store, or for the shared mailbox fallback (provider \"mail\"). " +
 			"Credentials are encrypted on disk and are never returned by any tool. " +
 			"Call receipts_providers first to see which fields the store needs.",
+		// MCP-Connect v1: MetaMCP renders a "Connect stores" button and, per
+		// store, a form built from receipts_providers.providers[].required_fields,
+		// then calls this tool with {provider, fields}. See connectMetaKey.
+		Meta: mcp.Meta{
+			connectMetaKey: map[string]any{
+				"kind":      "connect",
+				"label":     "Connect stores",
+				"group":     "receipts",
+				"targetArg": "provider",
+				"fieldsArg": "fields",
+				"targets": map[string]any{
+					"tool":      "receipts_providers",
+					"path":      "providers",
+					"id":        "provider",
+					"label":     "display_name",
+					"connected": "logged_in",
+					"fields":    "required_fields",
+					"notes":     "notes",
+				},
+			},
+		},
 	}, s.handleLogin)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "receipts_logout",
 		Description: "Delete the stored credentials of one store, or of the mailbox (provider \"mail\").",
+		// MCP-Connect v1: the disconnect action for a store; MetaMCP calls this
+		// with {provider} and no form.
+		Meta: mcp.Meta{
+			connectMetaKey: map[string]any{
+				"kind":      "disconnect",
+				"label":     "Disconnect a store",
+				"group":     "receipts",
+				"targetArg": "provider",
+			},
+		},
 	}, s.handleLogout)
 
 	mcp.AddTool(server, &mcp.Tool{
