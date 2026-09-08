@@ -4,10 +4,11 @@
 // the Lidl Plus mobile app uses, as documented by the community project
 // github.com/Andre0512/lidl-plus. They can change without notice.
 //
-// Logging in the way the app does needs a browser and an SMS code, which does
-// not belong in an MCP server, so this provider takes the refresh token that
-// flow produces and keeps it alive on its own. README.md explains how to get
-// one.
+// Logging in the way the app does needs a real browser (reCAPTCHA + Akamai)
+// and an SMS code, which does not belong in an MCP server, so this provider
+// takes the refresh token that flow produces and keeps it alive on its own.
+// The tools/lidl-login helper runs that one-time browser login locally and
+// prints the refresh token to paste here.
 package lidl
 
 import (
@@ -57,11 +58,6 @@ type Provider struct {
 	mu          sync.Mutex
 	accessToken string
 	expiresAt   time.Time
-
-	// pending holds interactive (phone+password+SMS) logins between the two
-	// receipts_login calls, keyed by the continuation token handed to the caller.
-	pendingMu sync.Mutex
-	pending   map[string]*pendingLogin
 }
 
 // New builds the provider. defaultCountry/defaultLanguage are used when the
@@ -88,15 +84,13 @@ func (p *Provider) Status(ctx context.Context) provider.Status {
 		DisplayName: p.DisplayName(),
 		Sources:     []string{"api"},
 		RequiredFields: []provider.Field{
-			{Name: "phone", Description: "Lidl Plus phone number in full international form, e.g. +48123456789 (EXPERIMENTAL: the server logs in and asks for the SMS code)", Required: false, Secret: false},
-			{Name: "password", Description: "Lidl Plus account password; used once to log in, never stored", Required: false, Secret: true},
+			{Name: "refresh_token", Description: "a Lidl Plus OAuth refresh token; run tools/lidl-login on your own computer once to get it (Lidl's login has reCAPTCHA + SMS, so it can't be done server-side)", Required: true, Secret: true},
 			{Name: "country", Description: "two letter country of the Lidl Plus account, e.g. PL, DE, NL", Required: true},
 			{Name: "language", Description: "interface language for item names, e.g. pl, de, en", Required: false},
-			{Name: "refresh_token", Description: "alternative to phone+password: a Lidl Plus OAuth refresh token (see README)", Required: false, Secret: true},
 		},
 		Notes: []string{
 			"unofficial app API; item lines, discounts and taxes are complete when it answers",
-			"phone+password login is EXPERIMENTAL: Lidl's web login uses reCAPTCHA, so it may fail — pasting a refresh_token always works",
+			"get the refresh_token with the tools/lidl-login helper (a one-time local browser login); the server then renews it on its own",
 		},
 	}
 	status.StoredFields = p.store.FieldNames(ID)
@@ -107,21 +101,14 @@ func (p *Provider) Status(ctx context.Context) provider.Status {
 	return status
 }
 
-// Login accepts a phone+password (the EXPERIMENTAL interactive flow, which asks
-// for an SMS code as a second step), a continuation resuming that flow, or a
-// ready refresh token. Whatever succeeds ends the same way: a stored refresh
-// token, verified by one exchange so a bad credential is reported now.
+// Login stores a Lidl Plus refresh token (produced by the tools/lidl-login
+// helper) with its country/language and exchanges it once so a bad token is
+// reported now. Lidl's login is reCAPTCHA- and SMS-gated, so the browser part
+// is done off to the side, exactly as the app does it.
 func (p *Provider) Login(ctx context.Context, fields map[string]string) (provider.LoginResult, error) {
-	if cont := strings.TrimSpace(fields["continuation"]); cont != "" {
-		return p.resumeInteractive(ctx, cont, fields)
-	}
-	if phone := strings.TrimSpace(fields["phone"]); phone != "" && fields["password"] != "" {
-		return p.startInteractive(ctx, fields)
-	}
-
 	token := strings.TrimSpace(fields["refresh_token"])
 	if token == "" {
-		return provider.LoginResult{}, errors.New("lidl: provide phone+password (experimental), or a refresh_token; see README")
+		return provider.LoginResult{}, errors.New("lidl: provide a refresh_token — run tools/lidl-login on your computer once to get one (see its README)")
 	}
 	return p.storeAndVerify(ctx, token, fields)
 }

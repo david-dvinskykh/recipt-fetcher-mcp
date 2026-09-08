@@ -1,0 +1,15 @@
+{
+  "name": "lidl-login",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local one-time browser helper that turns a Lidl Plus e-mail+password into a refresh token for the receipts MCP server.",
+  "bin": { "lidl-login": "./lidl-login.mjs" },
+  "scripts": {
+    "start": "node lidl-login.mjs"
+  },
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "playwright": "^1.47.0"
+  }
+}

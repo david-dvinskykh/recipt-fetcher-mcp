@@ -108,15 +108,20 @@ were stored.
 
 ### Lidl Plus
 
-Lidl's app login needs a browser and an SMS code, which does not belong in an
-MCP server. Get a **refresh token** once with the community CLI
-[Andre0512/lidl-plus](https://github.com/Andre0512/lidl-plus) (the project this
-provider's endpoints and headers are documented by):
+Lidl's login page is guarded by reCAPTCHA Enterprise + Akamai and finishes with
+an SMS/e-mail 2FA code, so it needs a real desktop browser and can't be done
+server-side. Get a **refresh token** once with the bundled helper — it opens a
+browser, you sign in (captcha + code), and it prints the token:
 
 ```bash
-pip install "lidl-plus[auth]"
-lidl-plus auth      # asks for country, phone, password and the SMS code
+cd tools/lidl-login
+npm install && npx playwright install chromium
+node lidl-login.mjs            # add --email / --password to pre-fill; see its README
 ```
+
+(The community CLI [Andre0512/lidl-plus](https://github.com/Andre0512/lidl-plus)
+— the project this provider's endpoints and headers are documented by — is an
+alternative: `pip install "lidl-plus[auth]" && lidl-plus auth`.)
 
 Then hand the token over:
 
@@ -146,21 +151,22 @@ moves it.
 
 ### Action
 
-Action's receipts come from a GraphQL gateway behind a Gigya (SAP CDC) OAuth
-login — the flow was recovered by decompiling the app (see
-[docs/reverse-engineering.md](docs/reverse-engineering.md)). The interactive
-login is Gigya's hosted page, so supply the token it produces:
+Action logs in with your account's own **e-mail + password** — the server signs
+in to `www.action.com` for you and reads receipts from the site's GraphQL API
+(see [docs/reverse-engineering.md](docs/reverse-engineering.md)):
 
 ```json
-{"provider": "action", "fields": {"refresh_token": "…"}}
+{"provider": "action", "fields": {"email": "you@example.com", "password": "…"}}
 ```
 
-A `token` (a ready access token) works as an alternative to `refresh_token`;
-`client_id` and `endpoint` can be overridden. Capture the token by logging in to
-Mijn Action in a browser or proxying the app and reading the `Authorization`
-header on a request to `gateway.action.com`. With a token stored, listings and
-`receipts_get` return the real receipts, item lines included; without one,
-Action falls back to e-mail.
+The password is stored encrypted so the session can be renewed on its own. With
+it stored, listings and `receipts_get` return the real receipts, item lines
+included.
+
+As an alternative, a captured app token still works via the Gigya gateway —
+`{"refresh_token": "…"}` (or a ready `token`), with `client_id` / `endpoint`
+overridable. Use this for accounts whose Action login is a social provider
+(e.g. Google), where there is no website password.
 
 ### The mailbox (fallback for Action and Allegro)
 
