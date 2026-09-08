@@ -15,9 +15,6 @@ package action
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -50,20 +47,6 @@ const (
 	// overridden if the refresh flow rejects it.
 	defaultClientID = "4_M_vWUHGO9oyocs0oKu8m7Q"
 
-	// gigyaAPIKey is the SAP Gigya (CDC) API key — the tail of the OIDC issuer,
-	// also the accounts.login apiKey and the default OIDC client id.
-	gigyaAPIKey = "4_M_vWUHGO9oyocs0oKu8m7Q"
-	// gigyaDataCenter is the Gigya data-center prefix (eu1 for Action). The
-	// accounts REST host is accounts.<dc>.gigya.com; overridable via a field.
-	gigyaDataCenter = "eu1"
-	// defaultRedirectURI is a best-effort guess at the app's OAuth redirect. It
-	// MUST match one registered on the Gigya OIDC client, so it is overridable
-	// via the redirect_uri field; a wrong value is the most likely reason the
-	// email+password login cannot capture an authorization code.
-	defaultRedirectURI = "com.action.consumerapp://oauth/callback"
-	// oidcScope is what the app requests; offline_access yields the refresh token.
-	oidcScope = "openid profile offline_access"
-
 	receiptsURL = "https://www.action.com/nl-nl/mijn-action/"
 )
 
@@ -86,6 +69,11 @@ type Provider struct {
 	mu          sync.Mutex
 	accessToken string
 	expiresAt   time.Time
+
+	// webClient is a cookie-jar HTTP client for the website (email+password)
+	// flow; created lazily.
+	webOnce   sync.Once
+	webClient *http.Client
 }
 
 // New builds the provider.
@@ -107,18 +95,15 @@ func (p *Provider) Status(ctx context.Context) provider.Status {
 		StoredFields: p.store.FieldNames(ID),
 		Sources:      []string{"api"},
 		RequiredFields: []provider.Field{
-			{Name: "email", Description: "Mijn Action account e-mail; with the password the server logs in for you (Gigya) and keeps only the refresh token", Required: false},
-			{Name: "password", Description: "Mijn Action account password; used once to obtain a token, never stored", Required: false, Secret: true},
-			{Name: "refresh_token", Description: "alternative to e-mail+password: an OAuth refresh token from a Mijn Action (Gigya) login; renewed automatically", Required: false, Secret: true},
+			{Name: "email", Description: "Mijn Action account e-mail; with the password the server logs in to the website for you", Required: false},
+			{Name: "password", Description: "Mijn Action account password (the one for mijn.action.com); stored encrypted so the session can be renewed", Required: false, Secret: true},
+			{Name: "refresh_token", Description: "alternative to e-mail+password: an OAuth refresh token captured from the app (Gigya); renewed automatically", Required: false, Secret: true},
 			{Name: "token", Description: "a ready access token captured from an app session, instead of a refresh token", Required: false, Secret: true},
-			{Name: "redirect_uri", Description: "override the OAuth redirect if the email+password login cannot capture a code; must match the Gigya client", Required: false},
-			{Name: "client_id", Description: "Gigya OIDC client id; defaults to the app's own", Required: false},
-			{Name: "data_center", Description: "Gigya data-center prefix; defaults to " + gigyaDataCenter, Required: false},
-			{Name: "endpoint", Description: "override for the GraphQL gateway; defaults to " + gatewayURL, Required: false},
+			{Name: "endpoint", Description: "override for the app GraphQL gateway (token mode); defaults to " + gatewayURL, Required: false},
 		},
 		Notes: []string{
-			"reverse-engineered from the Action app: GraphQL gateway + Gigya OIDC login (see docs/reverse-engineering.md)",
-			"log in with e-mail+password (the server runs the Gigya flow itself), or paste a refresh_token",
+			"log in with e-mail+password — the server signs in to mijn.action.com and reads receipts from the site (see docs/reverse-engineering.md)",
+			"or paste an app refresh_token to use the app gateway instead",
 			"gives the full receipt: item lines, VAT breakdown and payment methods",
 		},
 	}
@@ -128,13 +113,14 @@ func (p *Provider) Status(ctx context.Context) provider.Status {
 
 // Login stores credentials and verifies them with one listing when it can.
 //
-// Two ways in: e-mail+password, where the server runs the Gigya OIDC flow
-// itself and keeps only the resulting refresh token; or a ready refresh_token /
-// access token pasted in. The password is used once and never persisted.
+// Two ways in: e-mail+password, where the server signs in to the website and
+// keeps the session (the password is stored encrypted so it can re-login when
+// the cookie expires); or a ready refresh_token / access token for the app
+// gateway.
 func (p *Provider) Login(ctx context.Context, fields map[string]string) (provider.LoginResult, error) {
-	// Persist the non-secret overrides first so the password flow can read them.
+	// Persist the non-secret overrides first.
 	update := map[string]string{}
-	for _, name := range []string{"refresh_token", "token", "client_id", "endpoint", "redirect_uri", "data_center"} {
+	for _, name := range []string{"refresh_token", "token", "client_id", "endpoint"} {
 		if value := strings.TrimSpace(fields[name]); value != "" {
 			update[name] = value
 		}
@@ -146,15 +132,20 @@ func (p *Provider) Login(ctx context.Context, fields map[string]string) (provide
 	email := strings.TrimSpace(fields["email"])
 	password := fields["password"]
 	if email != "" && password != "" {
-		refresh, err := p.passwordLogin(ctx, email, password)
-		if err != nil {
-			return provider.LoginResult{Provider: ID, OK: false, Message: err.Error()}, nil
-		}
-		if err := p.store.Merge(ID, map[string]string{"refresh_token": refresh}); err != nil {
+		// Website login (mijn.action.com): a plain email+password POST that sets
+		// a session cookie; receipts then come from the site's GraphQL. This is
+		// how the browser logs in, and it works with the account's own password
+		// (unlike the app's Gigya OIDC, which many accounts reach via Google).
+		if err := p.store.Merge(ID, map[string]string{"email": email, "password": password, "mode": "web"}); err != nil {
 			return provider.LoginResult{}, err
 		}
-	} else if update["refresh_token"] == "" && update["token"] == "" &&
-		p.store.Field(ID, "refresh_token") == "" && p.store.Field(ID, "token") == "" {
+		if err := p.webLogin(ctx); err != nil {
+			return provider.LoginResult{Provider: ID, OK: false, Message: fmt.Sprintf("action: website login failed: %v", err)}, nil
+		}
+	} else if update["refresh_token"] != "" || update["token"] != "" {
+		// A pasted app token uses the gateway (Gigya) path.
+		_ = p.store.Merge(ID, map[string]string{"mode": "gateway"})
+	} else if !p.hasCredentials() {
 		return provider.LoginResult{}, errors.New("action: log in with email+password, or provide a refresh_token or token")
 	}
 	p.invalidateToken()
@@ -163,11 +154,14 @@ func (p *Provider) Login(ctx context.Context, fields map[string]string) (provide
 	receipts, err := p.list(ctx, provider.Query{Limit: 1})
 	if err != nil {
 		result.OK = false
-		result.Message = fmt.Sprintf("credentials stored, but the gateway did not accept them: %v", err)
-		result.Notes = append(result.Notes, "listings will fall back to e-mail until this is fixed")
+		result.Message = fmt.Sprintf("credentials stored, but reading receipts failed: %v", err)
 		return result, nil
 	}
-	result.Message = fmt.Sprintf("Action gateway ready (%d receipt(s) on the first page)", len(receipts))
+	source := "app gateway"
+	if p.webMode() {
+		source = "website"
+	}
+	result.Message = fmt.Sprintf("Action ready via %s (%d receipt(s) on the first page)", source, len(receipts))
 	return result, nil
 }
 
@@ -183,6 +177,9 @@ func (p *Provider) List(ctx context.Context, q provider.Query) ([]receipt.Receip
 }
 
 func (p *Provider) list(ctx context.Context, q provider.Query) ([]receipt.Receipt, error) {
+	// Both the app gateway and the website answer with the same
+	// receiptList{receipts, hasNext, offset} shape, so a single paging loop
+	// serves both; graphql() picks the transport based on the stored mode.
 	var (
 		out    []receipt.Receipt
 		offset string
@@ -241,6 +238,9 @@ func (p *Provider) Get(ctx context.Context, id string) (receipt.Receipt, error) 
 // graphql posts one operation and returns the `data` object, mapping transport
 // and GraphQL-level errors onto the provider's sentinels.
 func (p *Provider) graphql(ctx context.Context, op, query string, vars map[string]any) (jsonx.Object, error) {
+	if p.webMode() {
+		return p.webGraphQL(ctx, op, vars)
+	}
 	token, err := p.token(ctx)
 	if err != nil {
 		return nil, err
@@ -372,162 +372,13 @@ func (p *Provider) invalidateToken() {
 }
 
 func (p *Provider) hasCredentials() bool {
+	if p.store.Field(ID, "mode") == "web" {
+		return p.store.Field(ID, "email") != "" && p.store.Field(ID, "password") != ""
+	}
 	return p.store.Field(ID, "refresh_token") != "" || p.store.Field(ID, "token") != ""
 }
 
-// pickField reads a login override from the passed fields, then the store, then
-// a default — so a value given once at login keeps working on later renewals.
-func (p *Provider) pickField(name, def string) string {
-	if v := p.store.Field(ID, name); v != "" {
-		return v
-	}
-	return def
-}
-
-// passwordLogin runs the Gigya OIDC login the app does interactively, but
-// headless: REST accounts.login for a session, then the OIDC authorize endpoint
-// (carrying that session as login_token) for an authorization code, then the
-// token endpoint for a refresh token. Returns the refresh token to persist.
-//
-// This talks to SAP Gigya, whose exact client registration (redirect_uri, data
-// center) is not published; the pieces that can differ are overridable fields,
-// and a failure to capture a code almost always means redirect_uri must match
-// the one registered on the Gigya client.
-func (p *Provider) passwordLogin(ctx context.Context, email, password string) (string, error) {
-	apiKey := p.pickField("api_key", gigyaAPIKey)
-	dc := p.pickField("data_center", gigyaDataCenter)
-	clientID := p.pickField("client_id", defaultClientID)
-	redirect := p.pickField("redirect_uri", defaultRedirectURI)
-
-	// 1. accounts.login → a Gigya session (login_token).
-	loginForm := url.Values{
-		"apiKey":   {apiKey},
-		"loginID":  {email},
-		"password": {password},
-		"include":  {"profile,data"},
-		"format":   {"json"},
-	}.Encode()
-	var login struct {
-		ErrorCode    int    `json:"errorCode"`
-		ErrorMessage string `json:"errorMessage"`
-		ErrorDetails string `json:"errorDetails"`
-		SessionInfo  struct {
-			LoginToken   string `json:"login_token"`
-			CookieValue  string `json:"cookieValue"`
-			SessionToken string `json:"sessionToken"`
-		} `json:"sessionInfo"`
-	}
-	accountsURL := fmt.Sprintf("https://accounts.%s.gigya.com/accounts.login", dc)
-	if _, err := p.client.PostForm(ctx, accountsURL, loginForm,
-		map[string]string{"Accept": "application/json"}, &login); err != nil {
-		return "", fmt.Errorf("action: Gigya accounts.login failed: %w", err)
-	}
-	if login.ErrorCode != 0 {
-		msg := firstNonEmpty(login.ErrorMessage, login.ErrorDetails, "login rejected")
-		return "", fmt.Errorf("%w: Gigya login failed (%d): %s", provider.ErrCredentialsRejected, login.ErrorCode, msg)
-	}
-	loginToken := firstNonEmpty(login.SessionInfo.LoginToken, login.SessionInfo.CookieValue, login.SessionInfo.SessionToken)
-	if loginToken == "" {
-		return "", fmt.Errorf("%w: Gigya login returned no session token", provider.ErrCredentialsRejected)
-	}
-
-	// 2. OIDC authorize with the session → an authorization code (PKCE).
-	verifier, challenge, err := pkcePair()
-	if err != nil {
-		return "", err
-	}
-	authQuery := url.Values{
-		"client_id":             {clientID},
-		"redirect_uri":          {redirect},
-		"response_type":         {"code"},
-		"scope":                 {oidcScope},
-		"code_challenge":        {challenge},
-		"code_challenge_method": {"S256"},
-		"login_token":           {loginToken},
-	}.Encode()
-	code, err := p.authorizeCode(ctx, gigyaIssuer+"/authorize?"+authQuery, redirect)
-	if err != nil {
-		return "", err
-	}
-
-	// 3. Exchange the code for tokens.
-	tokenForm := url.Values{
-		"grant_type":    {"authorization_code"},
-		"code":          {code},
-		"redirect_uri":  {redirect},
-		"client_id":     {clientID},
-		"code_verifier": {verifier},
-	}.Encode()
-	var tok struct {
-		AccessToken  string `json:"access_token"`
-		RefreshToken string `json:"refresh_token"`
-		ExpiresIn    int    `json:"expires_in"`
-	}
-	tokenEndpoint := p.tokenEndpoint
-	if tokenEndpoint == "" {
-		tokenEndpoint = gigyaIssuer + "/token"
-	}
-	if _, err := p.client.PostForm(ctx, tokenEndpoint, tokenForm,
-		map[string]string{"Accept": "application/json"}, &tok); err != nil {
-		return "", fmt.Errorf("%w: token exchange failed: %v", provider.ErrCredentialsRejected, err)
-	}
-	if tok.RefreshToken == "" {
-		return "", fmt.Errorf("%w: token exchange returned no refresh_token (scope offline_access may be missing on the client)", provider.ErrCredentialsRejected)
-	}
-	return tok.RefreshToken, nil
-}
-
-// authorizeCode issues the OIDC authorize GET without following the redirect and
-// reads the `code` out of the Location header. A 200 (an HTML login page) means
-// the session was not accepted; anything without a code usually means the
-// redirect_uri does not match the one registered on the client.
-func (p *Provider) authorizeCode(ctx context.Context, authURL, redirect string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, authURL, nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Accept", "application/json")
-	client := &http.Client{
-		Timeout: 30 * time.Second,
-		CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		},
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("action: Gigya authorize request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	location := resp.Header.Get("Location")
-	if location == "" {
-		return "", fmt.Errorf("%w: Gigya did not return an authorization code (HTTP %d); set redirect_uri to the value the app registers", provider.ErrCredentialsRejected, resp.StatusCode)
-	}
-	loc, err := url.Parse(location)
-	if err != nil {
-		return "", fmt.Errorf("action: could not parse the authorize redirect: %w", err)
-	}
-	if code := loc.Query().Get("code"); code != "" {
-		return code, nil
-	}
-	if e := loc.Query().Get("error"); e != "" {
-		desc := loc.Query().Get("error_description")
-		return "", fmt.Errorf("%w: Gigya authorize error: %s %s", provider.ErrCredentialsRejected, e, desc)
-	}
-	return "", fmt.Errorf("%w: authorize redirect carried no code (%s)", provider.ErrCredentialsRejected, redirect)
-}
-
-// pkcePair returns a PKCE code_verifier and its S256 challenge.
-func pkcePair() (verifier, challenge string, err error) {
-	buf := make([]byte, 32)
-	if _, err = rand.Read(buf); err != nil {
-		return "", "", err
-	}
-	verifier = base64.RawURLEncoding.EncodeToString(buf)
-	sum := sha256.Sum256([]byte(verifier))
-	challenge = base64.RawURLEncoding.EncodeToString(sum[:])
-	return verifier, challenge, nil
-}
+func (p *Provider) webMode() bool { return p.store.Field(ID, "mode") == "web" }
 
 // listReceipt maps one receiptList entry onto the normalized summary shape.
 func listReceipt(obj jsonx.Object) receipt.Receipt {
@@ -620,6 +471,13 @@ func productItem(line jsonx.Object, currency string) receipt.Item {
 	total, cur := amountOf(line, "totalPrice")
 	if cur == "" {
 		total = money.New(total.Minor, currency)
+	}
+	// The website returns the line total as a formatted string, e.g. "8,99 zł",
+	// instead of the app's numeric totalPrice.
+	if total.IsZero() {
+		if formatted := line.String("totalPriceFormat"); formatted != "" {
+			total = money.ParseOrZero(stripCurrencyWords(formatted), currency)
+		}
 	}
 	item := receipt.Item{
 		Name:     strings.TrimSpace(line.String("description")),

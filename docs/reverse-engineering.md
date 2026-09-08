@@ -186,7 +186,42 @@ app's `4_M_vWUHGO9oyocs0oKu8m7Q`). The gateway is then called with
 (mitmproxy/Charles with the CA trusted; the app does not appear to pin), and read
 the OAuth callback / the `Authorization` header on a request to
 `gateway.action.com`. Store the refresh token (preferred) or the access token
-with `receipts_login`. Until then, Action falls back to e-mail.
+with `receipts_login`.
+
+### Website flow — e-mail + password, no token capture (preferred)
+
+The app's Gigya OIDC login is a hosted page many accounts reach via a social
+provider (Google), so those accounts have no password Gigya will accept — the
+app path then needs a captured token. The **website** (`www.action.com`) instead
+takes the account's own e-mail + password and is fully automatable, so it is the
+default: `internal/provider/action/action_web.go` implements it, and it is what a
+`mode=web` login uses. Recovered from a browser HAR and confirmed live:
+
+- `POST https://www.action.com/api/auth/login` with JSON `{ "email", "password" }`.
+  On success it returns `200` `{ membershipId, crmId }` and sets the session
+  cookies (`accessToken`, `tokensId`, `refreshToken`, all `HttpOnly`) plus
+  Cloudflare's `__cf_bm`. A Go `cookiejar` client keeps all of them.
+- Receipts then come from `GET https://www.action.com/api/graphql` using **Apollo
+  persisted queries** — `operationName` + a `sha256Hash` in `extensions`, no query
+  body. The operations are `ReceiptList` (`{ limit, offset }`, same paging cursor
+  as the app) and `ReceiptDetails` (`{ receiptId }`); their response shapes match
+  the app's, so the same mapping and paging loop are reused. The line total on the
+  website comes as a formatted string (`totalPriceFormat`, e.g. `"8,99 zł"`) rather
+  than the app's numeric `totalPrice`.
+
+Two guards a naive client trips, both confirmed against the live endpoint:
+
+- **Cloudflare managed challenge** on `/api/graphql`: a default Go `User-Agent` is
+  served the JS challenge page (`403`, "Just a moment…"). A browser-like
+  `User-Agent` together with the `__cf_bm` cookie the login sets clears it.
+- **Apollo CSRF prevention**: a bare `GET` is rejected (`400`, "blocked as a
+  potential Cross-Site Request Forgery") unless it carries
+  `x-apollo-operation-name` or `apollo-require-preflight`. The server also expects
+  `apollographql-client-name: web`.
+
+The current persisted-query hashes (which change when Action redeploys the site)
+are pinned in `action_web.go`; recapture them from a fresh HAR if the site starts
+returning `PERSISTED_QUERY_NOT_FOUND`.
 
 ---
 
