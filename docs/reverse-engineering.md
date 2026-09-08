@@ -102,31 +102,70 @@ pages.
 
 ---
 
-## Action — no published endpoint
+## Action — recovered by decompiling the app
 
-Action's digital receipts ("digitale kassabonnen") live in the Action app and in
-the Mijn Action account. Action publishes no API for them, and — unlike Lidl and
-Allegro — **no community project has captured and published the app's endpoint**
-(searched GitHub code and the web; nothing exists as of 2026-09).
+Action publishes no API and no community project had captured one, so the
+mechanism here was recovered by **decompiling the Android app**
+(`com.action.consumerapp`) directly: the APK was fetched and its DEX string pool
+scanned for endpoints, GraphQL documents and auth markers. The findings below
+are verbatim from the app and are what `internal/provider/action` now
+implements.
 
-So there is nothing verified to hard-code. `internal/provider/action` therefore
-treats the endpoint as **configuration**: give it `api_base` (plus, if needed,
-`login_path` / `receipts_path`) captured from your own Mijn Action session, and
-it maps the response onto the normalized model — the mapping probes field names
-rather than assuming a documented shape. Authentication accepts a captured
-bearer `token`, a session `cookie`, or `email`+`password` exchanged at
-`login_path`.
+**It is a GraphQL API, not REST** — which is why no REST "receipts" path was
+ever found.
 
-Until that endpoint is supplied, Action receipts come from the e-mail fallback
-(order/receipt confirmation mails parsed over IMAP), which gives the total and
-the shop but usually not the item lines.
+- Gateway: `POST https://gateway.action.com/api/gateway`
+  (staging: `https://integration-gateway.action.com/api/gateway`). The app is a
+  native Kotlin app using okhttp + Apollo GraphQL.
+- The two receipt operations, exactly as the app sends them:
 
-**To capture it yourself:** log in to Mijn Action in a browser (or proxy the
-app), open the network panel, and find the request the "Mijn digitale
-kassabonnen" page makes — its URL becomes `api_base` + `receipts_path`, and its
-`Authorization` / `Cookie` header is what you store. If you send me that request
-(headers + a sample JSON response, secrets redacted), the field mapping can be
-pinned to Action's real shape instead of probed.
+  ```graphql
+  query GetReceipts($limit: Int, $offset: String) {
+    receiptList(limit: $limit, offset: $offset) {
+      receipts { id dateTime store { name id } price { currency total } returningPeriod { returnable } }
+      offset
+    }
+  }
+
+  query GetSingleReceipt($receiptId: String!) {
+    receipt(id: $receiptId) {
+      receiptNumber dateTime store { address }
+      returningPeriod { totalDays remainingDays lastReturnDate }
+      price {
+        currency total subTotal employeeDiscount otherDiscounts
+        vat {
+          total { vatAmount totalIncludingVat totalExcludingVat }
+          perPercentage { percentage specification { vatAmount totalIncludingVat totalExcludingVat } }
+        }
+      }
+      totalQuantity barcode qrCode
+      products { code description totalPrice price { adjustedSalesPrice regularSalesPrice } quantity }
+      paymentMethods membershipId warrantyYears
+    }
+  }
+  ```
+
+  So the list pages by an opaque string `offset`, and the single receipt carries
+  full item lines, a VAT breakdown and payment methods.
+
+**Auth — OAuth2 Authorization Code + PKCE via SAP Gigya (Customer Data Cloud).**
+The app uses AppAuth (`net.openid.appauth`) against the OIDC issuer
+
+    https://fidm.eu1.gigya.com/oidc/op/v1.0/4_M_vWUHGO9oyocs0oKu8m7Q
+
+with scopes `openid profile offline_access` and a redirect of the form
+`<scheme>://oauth/callback`. The interactive login is Gigya's hosted page, so —
+as with Lidl — this server does not reimplement it: it takes either a ready
+access `token` or a `refresh_token`, and renews the latter at the issuer's
+`/token` endpoint (`grant_type=refresh_token`, `client_id` defaulting to the
+app's `4_M_vWUHGO9oyocs0oKu8m7Q`). The gateway is then called with
+`Authorization: Bearer <token>`.
+
+**Getting the tokens:** log in to Mijn Action in a browser or proxy the app
+(mitmproxy/Charles with the CA trusted; the app does not appear to pin), and read
+the OAuth callback / the `Authorization` header on a request to
+`gateway.action.com`. Store the refresh token (preferred) or the access token
+with `receipts_login`. Until then, Action falls back to e-mail.
 
 ---
 

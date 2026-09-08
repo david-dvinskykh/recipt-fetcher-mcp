@@ -17,7 +17,7 @@ at all:
 | --- | --- | --- |
 | Lidl Plus | the mobile app's own API (`tickets.lidlplus.com`) | works from a refresh token; full item lines, discounts, taxes |
 | Allegro | the buyer order endpoint the website calls (`api.allegro.pl/myorder-api/myorders`) | works from a browser session cookie, which expires within days |
-| Action | not published anywhere | endpoint must be supplied as configuration; until then, e-mail only |
+| Action | not published — recovered by decompiling the app | GraphQL gateway + Gigya OIDC login; works from a refresh/access token; full item lines |
 
 Where each auth flow and receipt endpoint comes from — and how to capture
 Action's yourself — is written up in [docs/reverse-engineering.md](docs/reverse-engineering.md).
@@ -146,27 +146,21 @@ moves it.
 
 ### Action
 
-If you have captured the endpoint the app or the Mijn Action page calls, give it
-plus a way to authenticate:
+Action's receipts come from a GraphQL gateway behind a Gigya (SAP CDC) OAuth
+login — the flow was recovered by decompiling the app (see
+[docs/reverse-engineering.md](docs/reverse-engineering.md)). The interactive
+login is Gigya's hosted page, so supply the token it produces:
 
 ```json
-{
-  "provider": "action",
-  "fields": {
-    "api_base": "https://…",
-    "receipts_path": "/…",
-    "token": "…"
-  }
-}
+{"provider": "action", "fields": {"refresh_token": "…"}}
 ```
 
-`email` + `password` (exchanged at `login_path`, default `/login`) and `cookie`
-work as alternatives to `token`. The response mapping probes field names rather
-than assuming them, so a JSON list of receipts with reasonably named fields
-(`id`, `date`, `total`, `store`, `lines`) maps without code changes.
-
-Without `api_base`, Action stays on the e-mail fallback, which is a working
-setup — just one without item lines.
+A `token` (a ready access token) works as an alternative to `refresh_token`;
+`client_id` and `endpoint` can be overridden. Capture the token by logging in to
+Mijn Action in a browser or proxying the app and reading the `Authorization`
+header on a request to `gateway.action.com`. With a token stored, listings and
+`receipts_get` return the real receipts, item lines included; without one,
+Action falls back to e-mail.
 
 ### The mailbox (fallback for Action and Allegro)
 
