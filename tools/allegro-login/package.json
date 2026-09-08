@@ -1,0 +1,15 @@
+{
+  "name": "allegro-login",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local one-time browser helper that captures a logged-in allegro.pl session cookie for the receipts MCP server.",
+  "bin": { "allegro-login": "./allegro-login.mjs" },
+  "scripts": {
+    "start": "node allegro-login.mjs"
+  },
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "playwright": "^1.47.0"
+  }
+}

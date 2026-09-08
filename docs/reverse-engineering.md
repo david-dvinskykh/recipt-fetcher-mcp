@@ -105,17 +105,32 @@ implements:
 There is no per-order buyer endpoint, so `Get` looks the order up in the recent
 pages.
 
-**Decompilation check (2026-09-08, app 9.x).** The APK confirms the provider's
-approach: `/myorder` appears ~590 times (the buyer order API), the versioned
-`vnd.allegro` media type ~100 times (the Accept header), and `QXLSESSID` is
-present (the session cookie). One nuance the decompilation adds: the app itself
-authenticates to the order API with an **OAuth2 bearer token** (it does the full
-Authorization-Code-plus-PKCE dance at `allegro.pl/auth/oauth/authorize` and talks
-to an `edge.allegro.pl` mobile BFF), whereas the community clients — and this
-server — reach the same `myorder-api/myorders` with the **web session cookie**.
-Both are accepted by that endpoint; the cookie is simply the one a user can grab
-without an OAuth app registration. (Allegro's mobile app also uses GraphQL and
-Apollo heavily, but for the seller/offer side, not for buyer orders.)
+**Decompilation check (2026-09-08, app 9.89.0).** Scanning the APK confirms the
+provider's approach and settles why the cookie — not an OAuth token — is the
+path a user can actually take:
+
+- The buyer order code is `pl.allegro.android.buyers.myorders.*` (classes
+  `Order`, `OrderGroup`, `OrderListing`, `OrdersActivity`) with API paths
+  `/myorders`, `/myorders/dynamic-cards`, `/myorders/order-picker`,
+  `/myorders/selector`; `QXLSESSID` and the versioned `vnd.allegro` media type
+  are present.
+- The app is OAuth2 (Authorization-Code + PKCE): `/auth/oauth/authorize`, a
+  token/verification path `/authentication/oauth-token/...`, `grant_type`,
+  `refresh_token`, `client_id`, `Bearer`, redirect scheme
+  `pl.allegro.android://`, talking to an `edge.allegro.pl` mobile BFF.
+- **But the app bundles the DataDome bot-protection SDK (`co.datadome.sdk.*`)
+  and gates login with an `allegrocaptcha.com` captcha.** DataDome attaches a
+  device-attestation token to the app's API calls, so the OAuth/bearer path
+  cannot be reproduced by a plain HTTP client even with a valid token — it would
+  be challenged. The web `myorder-api/myorders` reached with the session cookie
+  is *not* DataDome-walled (an unauthenticated probe returns a plain
+  `RBAC: access denied`, not a DataDome challenge), so the cookie is both the
+  grabbable credential and the one that works headlessly.
+
+So the realistic path is a one-time browser login that clears the captcha and
+DataDome and yields the session cookie — automated by the `tools/allegro-login`
+helper. (Allegro's mobile app also uses GraphQL/Apollo heavily, but for the
+seller/offer side, not buyer orders.)
 
 [allegro-api discussion #5394]: https://github.com/allegro/allegro-api/discussions/5394
 [Przemko92/home-assistant-allegro]: https://github.com/Przemko92/home-assistant-allegro
