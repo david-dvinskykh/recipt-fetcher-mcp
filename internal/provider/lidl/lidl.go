@@ -57,6 +57,11 @@ type Provider struct {
 	mu          sync.Mutex
 	accessToken string
 	expiresAt   time.Time
+
+	// pending holds interactive (phone+password+SMS) logins between the two
+	// receipts_login calls, keyed by the continuation token handed to the caller.
+	pendingMu sync.Mutex
+	pending   map[string]*pendingLogin
 }
 
 // New builds the provider. defaultCountry/defaultLanguage are used when the
@@ -83,11 +88,16 @@ func (p *Provider) Status(ctx context.Context) provider.Status {
 		DisplayName: p.DisplayName(),
 		Sources:     []string{"api"},
 		RequiredFields: []provider.Field{
-			{Name: "refresh_token", Description: "Lidl Plus OAuth refresh token (see README: obtaining a Lidl Plus refresh token)", Required: true, Secret: true},
+			{Name: "phone", Description: "Lidl Plus phone number in full international form, e.g. +48123456789 (EXPERIMENTAL: the server logs in and asks for the SMS code)", Required: false, Secret: false},
+			{Name: "password", Description: "Lidl Plus account password; used once to log in, never stored", Required: false, Secret: true},
 			{Name: "country", Description: "two letter country of the Lidl Plus account, e.g. PL, DE, NL", Required: true},
 			{Name: "language", Description: "interface language for item names, e.g. pl, de, en", Required: false},
+			{Name: "refresh_token", Description: "alternative to phone+password: a Lidl Plus OAuth refresh token (see README)", Required: false, Secret: true},
 		},
-		Notes: []string{"unofficial app API; item lines, discounts and taxes are complete when it answers"},
+		Notes: []string{
+			"unofficial app API; item lines, discounts and taxes are complete when it answers",
+			"phone+password login is EXPERIMENTAL: Lidl's web login uses reCAPTCHA, so it may fail — pasting a refresh_token always works",
+		},
 	}
 	status.StoredFields = p.store.FieldNames(ID)
 	status.LoggedIn = p.store.Field(ID, "refresh_token") != ""
@@ -97,13 +107,28 @@ func (p *Provider) Status(ctx context.Context) provider.Status {
 	return status
 }
 
-// Login stores a refresh token and immediately exchanges it, so a bad token is
-// reported now rather than at the first listing.
+// Login accepts a phone+password (the EXPERIMENTAL interactive flow, which asks
+// for an SMS code as a second step), a continuation resuming that flow, or a
+// ready refresh token. Whatever succeeds ends the same way: a stored refresh
+// token, verified by one exchange so a bad credential is reported now.
 func (p *Provider) Login(ctx context.Context, fields map[string]string) (provider.LoginResult, error) {
+	if cont := strings.TrimSpace(fields["continuation"]); cont != "" {
+		return p.resumeInteractive(ctx, cont, fields)
+	}
+	if phone := strings.TrimSpace(fields["phone"]); phone != "" && fields["password"] != "" {
+		return p.startInteractive(ctx, fields)
+	}
+
 	token := strings.TrimSpace(fields["refresh_token"])
 	if token == "" {
-		return provider.LoginResult{}, errors.New("lidl: refresh_token is required; see README for how to obtain one")
+		return provider.LoginResult{}, errors.New("lidl: provide phone+password (experimental), or a refresh_token; see README")
 	}
+	return p.storeAndVerify(ctx, token, fields)
+}
+
+// storeAndVerify persists a refresh token with the resolved country/language and
+// exchanges it once to confirm it works.
+func (p *Provider) storeAndVerify(ctx context.Context, token string, fields map[string]string) (provider.LoginResult, error) {
 	country := strings.ToUpper(strings.TrimSpace(fields["country"]))
 	if country == "" {
 		country = p.defaultCountry

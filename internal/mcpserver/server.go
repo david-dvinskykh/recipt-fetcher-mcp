@@ -280,16 +280,42 @@ func (s *Server) WebLogin(ctx context.Context, providerID string, fields map[str
 // --- receipts_login ---
 
 type loginInput struct {
-	Provider string            `json:"provider" jsonschema:"store id (lidl, action, allegro) or \"mail\" for the shared IMAP fallback"`
+	Provider string            `json:"provider,omitempty" jsonschema:"store id (lidl, action, allegro) or \"mail\" for the shared IMAP fallback; may be omitted when resuming with a continuation"`
 	Fields   map[string]string `json:"fields" jsonschema:"credential fields for that provider, as listed by receipts_providers"`
+	// Continuation resumes an interactive login (e.g. after an SMS code) using
+	// the token a previous receipts_login call returned in its next step.
+	Continuation string `json:"continuation,omitempty" jsonschema:"opaque token to resume an interactive login; returned by a previous receipts_login step"`
+}
+
+// connectResult is the MetaMCP Connect (MCP-Connect) result envelope; it lets a
+// login tell MetaMCP that another step (an SMS code, say) is needed.
+type connectResult struct {
+	Status  string       `json:"status"`
+	Message string       `json:"message,omitempty"`
+	Next    *connectNext `json:"next,omitempty"`
+}
+
+type connectNext struct {
+	Prompt       string           `json:"prompt,omitempty"`
+	Fields       []provider.Field `json:"fields,omitempty"`
+	ResumeTool   string           `json:"resumeTool,omitempty"`
+	Continuation string           `json:"continuation,omitempty"`
 }
 
 type loginOutput struct {
 	provider.LoginResult
+	Connect *connectResult `json:"ai.metamcp.connect/v1,omitempty"`
 }
 
 func (s *Server) handleLogin(ctx context.Context, req *mcp.CallToolRequest, in loginInput) (*mcp.CallToolResult, loginOutput, error) {
 	id := strings.ToLower(strings.TrimSpace(in.Provider))
+	// Resuming an interactive login: the provider is encoded in the continuation
+	// (e.g. "lidl:<token>"), so it need not be sent again.
+	if id == "" && in.Continuation != "" {
+		if i := strings.IndexByte(in.Continuation, ':'); i > 0 {
+			id = strings.ToLower(in.Continuation[:i])
+		}
+	}
 	if id == "" {
 		return nil, loginOutput{}, errors.New("provider is required")
 	}
@@ -301,7 +327,7 @@ func (s *Server) handleLogin(ctx context.Context, req *mcp.CallToolRequest, in l
 		if err := s.mail.Login(ctx, in.Fields); err != nil {
 			return nil, loginOutput{}, err
 		}
-		return nil, loginOutput{provider.LoginResult{
+		return nil, loginOutput{LoginResult: provider.LoginResult{
 			Provider: mailbox.SecretID,
 			OK:       true,
 			Message:  "mailbox credentials verified; Action and Allegro can now fall back to e-mail",
@@ -313,11 +339,41 @@ func (s *Server) handleLogin(ctx context.Context, req *mcp.CallToolRequest, in l
 	if err != nil {
 		return nil, loginOutput{}, err
 	}
-	result, err := p.Login(ctx, in.Fields)
+
+	// Pass the continuation to the provider through the fields map, so the
+	// Provider interface stays unchanged.
+	fields := in.Fields
+	if in.Continuation != "" {
+		fields = make(map[string]string, len(in.Fields)+1)
+		for k, v := range in.Fields {
+			fields[k] = v
+		}
+		fields["continuation"] = in.Continuation
+	}
+
+	result, err := p.Login(ctx, fields)
 	if err != nil {
 		return nil, loginOutput{}, err
 	}
-	return nil, loginOutput{result}, nil
+	return nil, loginOutput{LoginResult: result, Connect: connectEnvelope(result)}, nil
+}
+
+// connectEnvelope maps a provider's interactive next-step onto the MCP-Connect
+// result envelope MetaMCP's Connect wizard understands.
+func connectEnvelope(result provider.LoginResult) *connectResult {
+	if result.Next == nil {
+		return nil
+	}
+	return &connectResult{
+		Status:  "need_input",
+		Message: result.Message,
+		Next: &connectNext{
+			Prompt:       result.Next.Prompt,
+			Fields:       result.Next.Fields,
+			ResumeTool:   "receipts_login",
+			Continuation: result.Next.Continuation,
+		},
+	}
 }
 
 // --- receipts_logout ---

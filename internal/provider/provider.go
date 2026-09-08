@@ -52,6 +52,18 @@ type LoginResult struct {
 	Message  string   `json:"message,omitempty"`
 	Stored   []string `json:"stored_fields,omitempty"`
 	Notes    []string `json:"notes,omitempty"`
+	// Next, when set, means the login is not finished: the caller must collect
+	// these fields and call receipts_login again with the same Continuation. It
+	// drives interactive logins (an SMS code, a confirmation) and maps onto the
+	// MetaMCP Connect need_input step.
+	Next *LoginNext `json:"next,omitempty"`
+}
+
+// LoginNext describes the next step of an interactive login.
+type LoginNext struct {
+	Prompt       string  `json:"prompt,omitempty"`
+	Fields       []Field `json:"fields,omitempty"`
+	Continuation string  `json:"continuation,omitempty"`
 }
 
 // Status describes a provider's readiness.
