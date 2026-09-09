@@ -90,7 +90,15 @@ async function tryAutofill(page) {
     await emailInput.first().waitFor({ state: "visible", timeout: 15000 });
     await emailInput.first().fill(email);
     log("filled e-mail");
-    await page.locator("button[data-testid=button-primary], #button_btn_submit_email").first().click().catch(() => {});
+    // The e-mail step's "Dalej" button is login-or-register-submit-button (the
+    // password step's is button-primary); try both, plus the older id.
+    await page
+      .locator(
+        "button[data-testid=login-or-register-submit-button], button[data-testid=button-primary], #button_btn_submit_email",
+      )
+      .first()
+      .click()
+      .catch(() => {});
     if (!password) return;
     const pwInput = page.locator("#Password, #field_Password, input[type=password]");
     await pwInput.first().waitFor({ state: "visible", timeout: 15000 });
