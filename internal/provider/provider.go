@@ -61,9 +61,14 @@ type LoginResult struct {
 
 // LoginNext describes the next step of an interactive login.
 type LoginNext struct {
-	Prompt       string  `json:"prompt,omitempty"`
-	Fields       []Field `json:"fields,omitempty"`
-	Continuation string  `json:"continuation,omitempty"`
+	Prompt string  `json:"prompt,omitempty"`
+	Fields []Field `json:"fields,omitempty"`
+	// OpenURL, when set, is a URL the caller should open in the user's own
+	// browser before collecting Fields — e.g. an OAuth login the user completes
+	// in a real browser (passing captcha and 2FA), then pastes back a code. It
+	// maps onto the MetaMCP Connect "redirect" step.
+	OpenURL      string `json:"open_url,omitempty"`
+	Continuation string `json:"continuation,omitempty"`
 }
 
 // Status describes a provider's readiness.

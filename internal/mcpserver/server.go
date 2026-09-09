@@ -290,9 +290,10 @@ type loginInput struct {
 // connectResult is the MetaMCP Connect (MCP-Connect) result envelope; it lets a
 // login tell MetaMCP that another step (an SMS code, say) is needed.
 type connectResult struct {
-	Status  string       `json:"status"`
-	Message string       `json:"message,omitempty"`
-	Next    *connectNext `json:"next,omitempty"`
+	Status   string           `json:"status"`
+	Message  string           `json:"message,omitempty"`
+	Next     *connectNext     `json:"next,omitempty"`
+	Redirect *connectRedirect `json:"redirect,omitempty"`
 }
 
 type connectNext struct {
@@ -300,6 +301,13 @@ type connectNext struct {
 	Fields       []provider.Field `json:"fields,omitempty"`
 	ResumeTool   string           `json:"resumeTool,omitempty"`
 	Continuation string           `json:"continuation,omitempty"`
+}
+
+// connectRedirect asks MetaMCP to open a URL in the user's browser (an OAuth
+// login the user completes there) before collecting the Next step's fields.
+type connectRedirect struct {
+	URL          string `json:"url"`
+	Continuation string `json:"continuation,omitempty"`
 }
 
 type loginOutput struct {
@@ -319,11 +327,14 @@ func (s *Server) handleLogin(ctx context.Context, req *mcp.CallToolRequest, in l
 	if id == "" {
 		return nil, loginOutput{}, errors.New("provider is required")
 	}
-	if len(in.Fields) == 0 {
-		return nil, loginOutput{}, errors.New("fields is required; call receipts_providers to see which fields this provider needs")
-	}
-
+	// Fields may be empty when starting a browser login (the provider opens an
+	// OAuth page and asks for input next) or when resuming with a continuation;
+	// providers that need input up front report it themselves. Only the mailbox
+	// always needs its fields here.
 	if id == mailbox.SecretID {
+		if len(in.Fields) == 0 {
+			return nil, loginOutput{}, errors.New("fields is required; call receipts_providers to see which fields the mailbox needs")
+		}
 		if err := s.mail.Login(ctx, in.Fields); err != nil {
 			return nil, loginOutput{}, err
 		}
@@ -364,7 +375,7 @@ func connectEnvelope(result provider.LoginResult) *connectResult {
 	if result.Next == nil {
 		return nil
 	}
-	return &connectResult{
+	cr := &connectResult{
 		Status:  "need_input",
 		Message: result.Message,
 		Next: &connectNext{
@@ -374,6 +385,14 @@ func connectEnvelope(result provider.LoginResult) *connectResult {
 			Continuation: result.Next.Continuation,
 		},
 	}
+	// When the step also opens a browser (OAuth login), it is a "redirect" step:
+	// MetaMCP opens the URL and renders the Next fields for what the user pastes
+	// back (e.g. the OAuth code).
+	if result.Next.OpenURL != "" {
+		cr.Status = "redirect"
+		cr.Redirect = &connectRedirect{URL: result.Next.OpenURL, Continuation: result.Next.Continuation}
+	}
+	return cr
 }
 
 // --- receipts_logout ---

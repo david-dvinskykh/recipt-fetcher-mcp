@@ -58,6 +58,12 @@ type Provider struct {
 	mu          sync.Mutex
 	accessToken string
 	expiresAt   time.Time
+
+	// pending holds browser-login sessions between the "start" call (which opens
+	// the Lidl login in the user's browser) and the "resume" call (which brings
+	// back the OAuth code), keyed by the continuation token handed to the caller.
+	pendingMu sync.Mutex
+	pending   map[string]*pendingConnect
 }
 
 // New builds the provider. defaultCountry/defaultLanguage are used when the
@@ -84,13 +90,14 @@ func (p *Provider) Status(ctx context.Context) provider.Status {
 		DisplayName: p.DisplayName(),
 		Sources:     []string{"api"},
 		RequiredFields: []provider.Field{
-			{Name: "refresh_token", Description: "a Lidl Plus OAuth refresh token; run tools/lidl-login on your own computer once to get it (Lidl's login has reCAPTCHA + SMS, so it can't be done server-side)", Required: true, Secret: true},
-			{Name: "country", Description: "two letter country of the Lidl Plus account, e.g. PL, DE, NL", Required: true},
+			{Name: "country", Description: "two letter country of the Lidl Plus account, e.g. PL, DE, NL (default PL)", Required: false},
 			{Name: "language", Description: "interface language for item names, e.g. pl, de, en", Required: false},
+			{Name: "refresh_token", Description: "optional: paste a Lidl Plus refresh token if you already have one; leave empty to log in through your browser", Required: false, Secret: true},
 		},
 		Notes: []string{
 			"unofficial app API; item lines, discounts and taxes are complete when it answers",
-			"get the refresh_token with the tools/lidl-login helper (a one-time local browser login); the server then renews it on its own",
+			"Connect logs you in through your own browser: a Lidl login tab opens (solve the captcha + SMS there), then paste back the code it shows — no local tooling needed",
+			"the server keeps the resulting refresh token alive on its own",
 		},
 	}
 	status.StoredFields = p.store.FieldNames(ID)
@@ -106,11 +113,17 @@ func (p *Provider) Status(ctx context.Context) provider.Status {
 // reported now. Lidl's login is reCAPTCHA- and SMS-gated, so the browser part
 // is done off to the side, exactly as the app does it.
 func (p *Provider) Login(ctx context.Context, fields map[string]string) (provider.LoginResult, error) {
-	token := strings.TrimSpace(fields["refresh_token"])
-	if token == "" {
-		return provider.LoginResult{}, errors.New("lidl: provide a refresh_token — run tools/lidl-login on your computer once to get one (see its README)")
+	// Resuming the browser login with the pasted OAuth code.
+	if cont := strings.TrimSpace(fields["continuation"]); cont != "" {
+		return p.resumeConnect(ctx, cont, fields)
 	}
-	return p.storeAndVerify(ctx, token, fields)
+	// A pasted refresh token (e.g. from tools/lidl-login) skips the browser step.
+	if token := strings.TrimSpace(fields["refresh_token"]); token != "" {
+		return p.storeAndVerify(ctx, token, fields)
+	}
+	// Otherwise begin the browser login: open the Lidl OAuth page in the user's
+	// own browser (where reCAPTCHA and SMS work), then ask for the code back.
+	return p.startConnect(ctx, fields)
 }
 
 // storeAndVerify persists a refresh token with the resolved country/language and

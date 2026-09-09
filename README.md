@@ -109,9 +109,15 @@ were stored.
 ### Lidl Plus
 
 Lidl's login page is guarded by reCAPTCHA Enterprise + Akamai and finishes with
-an SMS/e-mail 2FA code, so it needs a real desktop browser and can't be done
-server-side. Get a **refresh token** once with the bundled helper — it opens a
-browser, you sign in (captcha + code), and it prints the token:
+an SMS/e-mail 2FA code, so it needs a real browser and can't be done
+server-side. The easiest way is **Connect in MetaMCP**: click Connect for Lidl
+and a Lidl login tab opens in *your* browser (where the captcha and SMS work);
+sign in, then paste back the `code` from the `com.lidlplus.app://callback`
+address your browser shows — the server exchanges it for a refresh token. Only
+`country` (default PL) is needed up front.
+
+Prefer the command line? Get the **refresh token** once with the bundled
+helper and paste it as `refresh_token`:
 
 ```bash
 cd tools/lidl-login
@@ -123,7 +129,7 @@ node lidl-login.mjs            # add --email / --password to pre-fill; see its R
 — the project this provider's endpoints and headers are documented by — is an
 alternative: `pip install "lidl-plus[auth]" && lidl-plus auth`.)
 
-Then hand the token over:
+Either way, to hand a token over directly:
 
 ```json
 {
