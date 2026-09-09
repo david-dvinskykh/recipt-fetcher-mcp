@@ -11,6 +11,14 @@ package lidl
 // shows the URL); the user pastes that code back and resumeConnect exchanges it
 // for a refresh token — exactly the Authorization-Code + PKCE dance the app
 // does. The tools/lidl-login helper automates the same thing locally.
+//
+// The flow is stateless: the PKCE verifier and the resolved country/language
+// are carried inside the continuation token the caller round-trips back, not in
+// server memory. That matters because MetaMCP proxies the two calls (start,
+// then resume after the user logs in) and recycles the stdio session in
+// between, which would wipe any in-process state. The verifier is a one-time,
+// single-use PKCE secret for this flow only, so carrying it in the opaque
+// continuation the client already holds is safe.
 
 import (
 	"context"
@@ -21,7 +29,6 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/david-dvinskykh/recipt-fetcher-mcp/internal/provider"
 )
@@ -31,17 +38,10 @@ const (
 	oauthScopes = "openid profile offline_access lpprofile lpapis"
 	redirectURI = "com.lidlplus.app://callback"
 
-	pendingTTL = 15 * time.Minute
+	// continuationPrefix keeps the provider id in the token (handleLogin reads
+	// it) ahead of the encoded state.
+	continuationPrefix = ID + ":"
 )
-
-// pendingConnect is a browser login waiting for its OAuth code. It holds the
-// PKCE verifier and the resolved country/language between the two calls.
-type pendingConnect struct {
-	verifier  string
-	country   string
-	language  string
-	createdAt time.Time
-}
 
 // startConnect begins the browser login and returns the authorize URL to open
 // plus a prompt for the code the user will paste back.
@@ -77,14 +77,6 @@ func (p *Provider) startConnect(ctx context.Context, fields map[string]string) (
 		"language":              {language + "-" + country},
 	}.Encode()
 
-	token := ID + ":" + randomToken()
-	p.putPending(token, &pendingConnect{
-		verifier:  verifier,
-		country:   country,
-		language:  language,
-		createdAt: time.Now(),
-	})
-
 	return provider.LoginResult{
 		Provider: ID,
 		OK:       false,
@@ -95,28 +87,29 @@ func (p *Provider) startConnect(ctx context.Context, fields map[string]string) (
 			Fields: []provider.Field{
 				{Name: "code", Description: "the code from the com.lidlplus.app://callback address after you log in (the whole URL is fine)", Required: true, Secret: false},
 			},
-			Continuation: token,
+			Continuation: encodeContinuation(verifier, country, language),
 		},
 	}, nil
 }
 
 // resumeConnect exchanges the pasted OAuth code for a refresh token and stores
-// it, verifying it once.
+// it, verifying it once. All state comes from the continuation, so it works
+// even if the server process was recycled since startConnect.
 func (p *Provider) resumeConnect(ctx context.Context, continuation string, fields map[string]string) (provider.LoginResult, error) {
-	pend := p.takePending(continuation)
-	if pend == nil {
-		return provider.LoginResult{}, errors.New("lidl: this login expired or was not found; start again from Connect")
+	verifier, country, language, ok := decodeContinuation(continuation)
+	if !ok {
+		return provider.LoginResult{}, errors.New("lidl: this login token is invalid; start again from Connect")
 	}
 	code := parseCode(fields["code"])
 	if code == "" {
 		return provider.LoginResult{}, errors.New("lidl: no code found — paste the com.lidlplus.app://callback address (or its code= value) from your browser")
 	}
 
-	refresh, err := p.exchangeCode(ctx, code, pend.verifier)
+	refresh, err := p.exchangeCode(ctx, code, verifier)
 	if err != nil {
 		return provider.LoginResult{}, err
 	}
-	return p.storeAndVerify(ctx, refresh, map[string]string{"country": pend.country, "language": pend.language})
+	return p.storeAndVerify(ctx, refresh, map[string]string{"country": country, "language": language})
 }
 
 // exchangeCode trades an authorization code for tokens and returns the refresh.
@@ -145,6 +138,30 @@ func (p *Provider) exchangeCode(ctx context.Context, code, verifier string) (str
 	return resp.RefreshToken, nil
 }
 
+// encodeContinuation packs the PKCE verifier and resolved locale into the opaque
+// token the caller round-trips back on resume. Format: "lidl:" + base64url of
+// "verifier|country|language".
+func encodeContinuation(verifier, country, language string) string {
+	raw := strings.Join([]string{verifier, country, language}, "|")
+	return continuationPrefix + base64.RawURLEncoding.EncodeToString([]byte(raw))
+}
+
+func decodeContinuation(continuation string) (verifier, country, language string, ok bool) {
+	enc := strings.TrimPrefix(continuation, continuationPrefix)
+	if enc == continuation || enc == "" {
+		return "", "", "", false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(enc)
+	if err != nil {
+		return "", "", "", false
+	}
+	parts := strings.Split(string(raw), "|")
+	if len(parts) != 3 || parts[0] == "" {
+		return "", "", "", false
+	}
+	return parts[0], parts[1], parts[2], true
+}
+
 // parseCode accepts either a bare code or the whole callback URL/query and
 // returns the code value.
 func parseCode(raw string) string {
@@ -171,34 +188,6 @@ func parseCode(raw string) string {
 	return s
 }
 
-func (p *Provider) putPending(token string, pc *pendingConnect) {
-	p.pendingMu.Lock()
-	defer p.pendingMu.Unlock()
-	if p.pending == nil {
-		p.pending = map[string]*pendingConnect{}
-	}
-	for k, v := range p.pending {
-		if time.Since(v.createdAt) > pendingTTL {
-			delete(p.pending, k)
-		}
-	}
-	p.pending[token] = pc
-}
-
-func (p *Provider) takePending(token string) *pendingConnect {
-	p.pendingMu.Lock()
-	defer p.pendingMu.Unlock()
-	pc := p.pending[token]
-	if pc == nil {
-		return nil
-	}
-	delete(p.pending, token)
-	if time.Since(pc.createdAt) > pendingTTL {
-		return nil
-	}
-	return pc
-}
-
 func pkcePair() (verifier, challenge string, err error) {
 	buf := make([]byte, 32)
 	if _, err = rand.Read(buf); err != nil {
@@ -207,10 +196,4 @@ func pkcePair() (verifier, challenge string, err error) {
 	verifier = base64.RawURLEncoding.EncodeToString(buf)
 	sum := sha256.Sum256([]byte(verifier))
 	return verifier, base64.RawURLEncoding.EncodeToString(sum[:]), nil
-}
-
-func randomToken() string {
-	buf := make([]byte, 16)
-	_, _ = rand.Read(buf)
-	return base64.RawURLEncoding.EncodeToString(buf)
 }

@@ -58,12 +58,6 @@ type Provider struct {
 	mu          sync.Mutex
 	accessToken string
 	expiresAt   time.Time
-
-	// pending holds browser-login sessions between the "start" call (which opens
-	// the Lidl login in the user's browser) and the "resume" call (which brings
-	// back the OAuth code), keyed by the continuation token handed to the caller.
-	pendingMu sync.Mutex
-	pending   map[string]*pendingConnect
 }
 
 // New builds the provider. defaultCountry/defaultLanguage are used when the
