@@ -145,9 +145,13 @@ this is a one-time step unless you log out of the app everywhere.
 
 Allegro's buyer orders need a logged-in **session cookie** (the app's OAuth path
 is bot-protected by DataDome, so it can't be reproduced server-side — see
-[docs/reverse-engineering.md](docs/reverse-engineering.md)). Get the cookie once
-with the bundled helper — it opens a browser, you sign in, and it prints the
-cookie:
+[docs/reverse-engineering.md](docs/reverse-engineering.md)). The easiest way is
+**Connect in MetaMCP**: click Connect for Allegro and an Allegro login tab opens
+in *your* browser (where DataDome and the captcha work); sign in, then paste
+back your session `Cookie` (from DevTools → Application → Cookies → allegro.pl,
+or a request's `Cookie` header in the Network tab).
+
+Prefer the command line? The bundled helper reads the cookie for you:
 
 ```bash
 cd tools/allegro-login
@@ -155,8 +159,7 @@ npm install && npx playwright install chromium
 node allegro-login.mjs
 ```
 
-Then hand it over (or copy the `Cookie` header of any logged-in `api.allegro.pl`
-request from your browser's dev tools yourself):
+Either way, to hand the cookie over directly:
 
 ```json
 {"provider": "allegro", "fields": {"cookie": "QXLSESSID=…; wdctx=…"}}

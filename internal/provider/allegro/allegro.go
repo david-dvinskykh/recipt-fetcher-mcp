@@ -38,6 +38,9 @@ const defaultEndpoint = "https://api.allegro.pl/myorder-api/myorders"
 // purchasesURL is where a human can look the order up.
 const purchasesURL = "https://allegro.pl/moje-allegro/zakupy/kupione"
 
+// loginURL is the Allegro sign-in page opened for the browser login.
+const loginURL = "https://allegro.pl/logowanie"
+
 // acceptHeader is the versioned vendor media type myorder-api expects; a plain
 // application/json is answered with a login redirect instead.
 const acceptHeader = "application/vnd.allegro.public.v3+json"
@@ -71,21 +74,36 @@ func (p *Provider) Status(ctx context.Context) provider.Status {
 		StoredFields: p.store.FieldNames(ID),
 		Sources:      []string{"api"},
 		RequiredFields: []provider.Field{
-			{Name: "cookie", Description: "Cookie header from a logged-in allegro.pl session (the QXLSESSID session cookie is the one that matters; see README)", Required: true, Secret: true},
+			{Name: "cookie", Description: "optional: paste a logged-in allegro.pl Cookie header if you have one; leave empty to log in through your browser (the QXLSESSID and wdctx cookies are the ones that matter)", Required: false, Secret: true},
 			{Name: "endpoint", Description: "override for the buyer order endpoint; defaults to " + defaultEndpoint, Required: false},
 		},
 		Notes: []string{
 			"Allegro's public OAuth API only exposes seller orders, so the buyer list is read with a browser session cookie",
+			"Connect logs you in through your own browser: an Allegro login tab opens, then you paste back your session Cookie — no local tooling needed",
 			"the cookie expires (typically within days); when it does, receipts come from e-mail until you log in again",
 		},
 	}
 }
 
-// Login stores the session cookie and verifies it with one request.
+// Login stores the session cookie and verifies it with one request. With no
+// cookie it starts the browser login instead: it asks the caller to open the
+// Allegro login (in the user's own browser, where DataDome and the captcha
+// work) and paste the resulting session Cookie back.
 func (p *Provider) Login(ctx context.Context, fields map[string]string) (provider.LoginResult, error) {
 	cookie := strings.TrimSpace(fields["cookie"])
 	if cookie == "" {
-		return provider.LoginResult{}, errors.New("allegro: cookie is required; copy the Cookie header of a logged-in allegro.pl request (see README)")
+		return provider.LoginResult{
+			Provider: ID,
+			OK:       false,
+			Message:  "Log in to Allegro in the tab that opens",
+			Next: &provider.LoginNext{
+				Prompt:  "An Allegro login tab opened — sign in there. Then open your browser's DevTools (F12) → Application → Cookies → https://allegro.pl, and paste the Cookie here (at least QXLSESSID and wdctx, as \"QXLSESSID=…; wdctx=…\"). From the Network tab you can instead copy a request's whole Cookie header.",
+				OpenURL: loginURL,
+				Fields: []provider.Field{
+					{Name: "cookie", Description: "the allegro.pl session Cookie, e.g. \"QXLSESSID=…; wdctx=…\"", Required: true, Secret: true},
+				},
+			},
+		}, nil
 	}
 	update := map[string]string{"cookie": cookie}
 	if endpoint := strings.TrimSpace(fields["endpoint"]); endpoint != "" {
